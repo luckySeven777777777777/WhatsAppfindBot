@@ -21,18 +21,21 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ================= 功能函数 =================
 
 def send_to_tg(text, file_path=None):
-    """发送通知到 TG (带 5s 硬超时，防止卡死)"""
-    print(f"【系统日志】: {text}")
+    """发送通知到 TG (增强版：带错误日志和长超时)"""
+    print(f"【系统日志】: 尝试发送消息 - {text}")
     try:
-        if file_path:
+        if file_path and os.path.exists(file_path):
             url = f"https://api.telegram.org/bot{TG_TOKEN}/sendDocument"
             with open(file_path, 'rb') as f:
-                requests.post(url, data={'chat_id': CHAT_ID, 'caption': text}, files={'document': f}, timeout=5)
+                # 增加到 20秒超时，防止云端网络波动
+                resp = requests.post(url, data={'chat_id': CHAT_ID, 'caption': text}, files={'document': f}, timeout=20)
+                print(f"【系统日志】: 文件发送响应 - {resp.status_code}")
         else:
             url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-            requests.post(url, data={'chat_id': CHAT_ID, 'text': text}, timeout=5)
-    except:
-        print("【提示】TG 推送失败，可能是网络问题。")
+            resp = requests.post(url, data={'chat_id': CHAT_ID, 'text': text}, timeout=10)
+            print(f"【系统日志】: 文字发送响应 - {resp.status_code}")
+    except Exception as e:
+        print(f"【错误】TG 推送失败: {e}")
 
 async def check_number(context, phone):
     """号码检测逻辑"""
@@ -55,39 +58,50 @@ async def main():
     async with async_playwright() as p:
         print("🚀 正在云端初始化检测引擎...")
         
-        # Railway 环境会自动设置 RAILWAY_ENVIRONMENT 变量
-        is_cloud = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        
         # 在云端必须 headless=True
         context = await p.chromium.launch_persistent_context(
             user_data_dir=SESSION_DIR,
-            headless=True, # 云端运行必须隐藏窗口
+            headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
         )
 
         page = await context.new_page()
+        
+        # 启动测试：发一条文字消息，确认机器人通了
+        send_to_tg("🔔 系统提示：WhatsApp 检测程序已在 Railway 启动...")
+
         print("🔗 正在访问 WhatsApp Web...")
         await page.goto("https://web.whatsapp.com")
         
-        # 登录逻辑
-        await asyncio.sleep(10)
+        # 等待二维码出现
+        print("⌛ 等待页面加载...")
+        await asyncio.sleep(15) 
+        
         qr_canvas = await page.query_selector("canvas")
         if qr_canvas:
-            print("📢 需要扫码，正在发送二维码到 Telegram...")
-            await page.screenshot(path="qr_login.png")
-            send_to_tg("⚠️ 请扫码登录 WhatsApp", "qr_login.png")
+            print("📢 捕获到二维码，准备截图并发送...")
+            qr_path = "qr_login.png"
+            await page.screenshot(path=qr_path)
             
-            # 给 2 分钟扫码时间
-            for i in range(60):
+            # 尝试发送二维码
+            send_to_tg("⚠️ 请扫码登录 WhatsApp", qr_path)
+            
+            # 给 3 分钟扫码时间
+            print("⌛ 正在等待扫码 (3分钟窗口)...")
+            for i in range(90):
                 if not await page.query_selector("canvas"):
-                    print("✅ 登录成功！")
+                    print("✅ 扫码成功，进入系统！")
+                    send_to_tg("✅ 登录成功，开始检测任务！")
                     break
                 await asyncio.sleep(2)
+        else:
+            print("💡 未发现二维码，可能已处于登录状态。")
 
         # 处理文件
         files = [f for f in os.listdir(CONTACTS_DIR) if f.endswith(".xlsx")]
         if not files:
             print("❌ contacts 文件夹里没文件！")
+            send_to_tg("❌ 错误：contacts 文件夹里找不到 .xlsx 文件！")
             return
 
         for file_name in files:
@@ -108,9 +122,12 @@ async def main():
             output_file = f"checked_{file_name}"
             output_path = os.path.join(OUTPUT_DIR, output_file)
             pd.DataFrame(results).to_excel(output_path, index=False)
-            send_to_tg(f"✅ 任务完成: {file_name}", output_path)
+            send_to_tg(f"📊 任务完成: {file_name}", output_path)
 
         await context.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"程序崩溃: {e}")
