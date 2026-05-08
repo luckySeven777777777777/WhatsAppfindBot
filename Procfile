@@ -1,1 +1,0 @@
-worker: python whatsapp_check.py
